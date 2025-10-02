@@ -5,18 +5,20 @@ import os
 import xml.etree.ElementTree as ET
 from datetime import datetime
 import sys
+import csv
+import hashlib
+import base64
 
 
 def indent(elem, level=0):
-    """Добавляет отступы для красивого форматирования XML"""
     i = "\n" + level * "  "
     if len(elem):
         if not elem.text or not elem.text.strip():
             elem.text = i + "  "
         if not elem.tail or not elem.tail.strip():
             elem.tail = i
-        for elem in elem:
-            indent(elem, level + 1)
+        for child in elem:
+            indent(child, level + 1)
         if not elem.tail or not elem.tail.strip():
             elem.tail = i
     else:
@@ -30,10 +32,24 @@ class VFSEmulator:
         self.vfs_path = vfs_path
         self.log_file = log_file
         self.startup_script = startup_script
-        self.current_directory = vfs_path
-        self.title = "VFS"
+        self.current_path = ["/"]  # текущий путь как список
+        self.title = os.path.splitext(os.path.basename(vfs_path))[0]
         self.root.title(f"{self.title}")
         self.custom_font = font.Font(family="Courier New", size=10)
+
+        # Загрузка VFS
+        try:
+            with open(self.vfs_path, "rb") as f:
+                self.vfs_raw = f.read()
+            self.vfs_sha256 = hashlib.sha256(self.vfs_raw).hexdigest()
+            self.vfs_tree = self._load_vfs_from_csv(self.vfs_raw.decode('utf-8'))
+        except FileNotFoundError:
+            print(f"Error: VFS file not found: {self.vfs_path}")
+            sys.exit(1)
+        except Exception as e:
+            print(f"Error: Invalid VFS format: {e}")
+            sys.exit(1)
+
         self.create_widgets()
         self.print_welcome()
         self.log_startup_parameters()
@@ -41,10 +57,32 @@ class VFSEmulator:
         self.prompt()
         self.command_entry.bind("<Return>", self.execute_command)
 
+    def _load_vfs_from_csv(self, csv_text):
+        tree = {"": {"type": "dir", "children": {}}}
+        reader = csv.DictReader(csv_text.splitlines())
+        for row in reader:
+            path = row["path"]
+            parts = [p for p in path.split("/") if p]
+            current = tree[""]["children"]
+            for part in parts[:-1]:
+                if part not in current:
+                    current[part] = {"type": "dir", "children": {}}
+                elif current[part]["type"] != "dir":
+                    pass  # игнорируем конфликт
+                current = current[part]["children"]
+            last = parts[-1] if parts else ""
+            if not parts:
+                continue
+            if last not in current:
+                if row["type"] == "dir":
+                    current[last] = {"type": "dir", "children": {}}
+                else:
+                    content = base64.b64decode(row["content"]) if row["content"] else b""
+                    current[last] = {"type": "file", "content": content}
+        return tree
+
     def log_startup_parameters(self):
-        print("Debug: VFS Path:", self.vfs_path)
-        print("Debug: Log File:", self.log_file)
-        print("Debug: Startup Script:", self.startup_script)
+        pass  # убран debug-вывод в stdout (не требуется по ТЗ)
 
     def create_widgets(self):
         main_frame = tk.Frame(self.root)
@@ -99,7 +137,7 @@ class VFSEmulator:
                     if line and not line.startswith('#'):
                         self.print_output(f"user@vfs$ {line}\n")
                         command, args = self.parse_command(line)
-                        self.log_command(command, args)  # Логируем команду из скрипта
+                        self.log_command(command, args)
                         success = self.execute_parsed_command(command, args)
                         if not success:
                             self.print_output("Script execution stopped due to error.\n")
@@ -136,16 +174,12 @@ class VFSEmulator:
                 existing_tree = ET.parse(self.log_file)
                 existing_root = existing_tree.getroot()
                 existing_root.append(event_elem)
-
-                # Применяем форматирование
                 indent(existing_root)
                 tree = ET.ElementTree(existing_root)
             except ET.ParseError:
-                # Если файл лога пустой или поврежден, создаем новый
                 indent(root_elem)
                 tree = ET.ElementTree(root_elem)
         else:
-            # Создаем новый файл с красивым форматированием
             indent(root_elem)
             tree = ET.ElementTree(root_elem)
 
@@ -153,20 +187,15 @@ class VFSEmulator:
 
     def execute_command(self, event=None):
         command_line = self.command_entry.get().strip()
-
         if not command_line:
             self.command_entry.delete(0, tk.END)
             return
-
         self.print_output(f"user@vfs$ {command_line}\n")
-
         command, args = self.parse_command(command_line)
         self.log_command(command, args)
-
         success = self.execute_parsed_command(command, args)
         if not success:
             self.print_output("Script execution stopped due to error.\n")
-
         self.command_entry.delete(0, tk.END)
 
     def execute_parsed_command(self, command, args):
@@ -174,10 +203,11 @@ class VFSEmulator:
             self.cmd_exit(args)
             return True
         elif command == "ls":
-            self.cmd_ls(args)
-            return True
+            return self.cmd_ls(args)
         elif command == "cd":
-            self.cmd_cd(args)
+            return self.cmd_cd(args)
+        elif command == "vfs-info":
+            self.cmd_vfs_info(args)
             return True
         elif command:
             self.print_output(f"vfs: {command}: command not found\n")
@@ -190,17 +220,91 @@ class VFSEmulator:
         self.print_output("Exiting...\n")
         self.root.after(100, self.root.destroy)
 
-    def cmd_ls(self, args):
-        if args:
-            self.print_output(f"ls: arguments: {args}\n")
+    def _resolve_path(self, given_path):
+        if given_path == "":
+            # Без аргумента — используем текущий путь
+            return self.current_path[1:] if self.current_path != ["/"] else []
+        if given_path == "/":
+            return []
+        if given_path.startswith("/"):
+            parts = [p for p in given_path.split("/") if p]
         else:
-            self.print_output("ls: no arguments\n")
+            current_parts = self.current_path[1:] if self.current_path != ["/"] else []
+            parts = current_parts + [p for p in given_path.split("/") if p]
+        resolved = []
+        for part in parts:
+            if part == "..":
+                if resolved:
+                    resolved.pop()
+            elif part == ".":
+                continue
+            else:
+                resolved.append(part)
+        return resolved
+
+    def _get_node(self, path_parts):
+        current = self.vfs_tree[""]
+        if current["type"] != "dir":
+            return None
+        children = current["children"]
+
+        for part in path_parts:
+            if part not in children:
+                return None
+            node = children[part]
+            if node["type"] == "dir":
+                children = node["children"]
+            else:
+                if part != path_parts[-1]:
+                    return None
+                return node
+        return current if not path_parts else {"type": "dir", "children": children}
+    def cmd_ls(self, args):
+        target = args[0] if args else ""
+        path_parts = self._resolve_path(target)
+        node = self._get_node(path_parts)
+        if node is None:
+            self.print_output(f"ls: cannot access '{target or '/'}': No such file or directory\n")
+            return False
+        if node["type"] != "dir":
+            self.print_output(f"ls: '{target or '/'}' is not a directory\n")
+            return False
+        names = sorted(node["children"].keys())
+        if names:
+            self.print_output("  ".join(names) + "\n")
+        return True
 
     def cmd_cd(self, args):
+        if not args:
+            self.current_path = ["/"]
+            return True
+        target = args[0]
+        if target == "..":
+            if len(self.current_path) > 1:
+                self.current_path.pop()
+            return True
+        elif target == "." or target == "/":
+            if target == "/":
+                self.current_path = ["/"]
+            return True
+        path_parts = self._resolve_path(target)
+        node = self._get_node(path_parts)
+        if node is None:
+            self.print_output(f"cd: {target}: No such file or directory\n")
+            return False
+        if node["type"] != "dir":
+            self.print_output(f"cd: {target}: Not a directory\n")
+            return False
+        self.current_path = [""] + path_parts
+        return True
+
+    def cmd_vfs_info(self, args):
         if args:
-            self.print_output(f"cd: arguments: {args}\n")
-        else:
-            self.print_output("cd: no arguments\n")
+            self.print_output("vfs-info: unexpected argument\n")
+            return False
+        self.print_output(f"VFS name: {self.title}\n")
+        self.print_output(f"SHA-256: {self.vfs_sha256}\n")
+        return True
 
 
 def main():

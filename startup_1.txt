@@ -1,5 +1,10 @@
 ls
+ls /home
+ls /home/user
 cd /home
 ls
-cd /tmp
+cd user
+cd /etc
 ls
+cd /
+vfs-info
