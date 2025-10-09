@@ -94,3 +94,291 @@ class VFSEmulator:
             insertbackground="white",
             state="disabled"
         )
+        self.output_area.pack(fill=tk.BOTH, expand=True)
+
+        input_frame = tk.Frame(main_frame, bg="black")
+        input_frame.pack(fill=tk.X, pady=(2, 0))
+
+        self.prompt_label = tk.Label(
+            input_frame,
+            text=f"{self.username}@{self.hostname}$ ",
+            font=self.custom_font,
+            bg="black",
+            fg="green",
+            anchor="w"
+        )
+        self.prompt_label.pack(side=tk.LEFT)
+
+        self.command_entry = tk.Entry(
+            input_frame,
+            font=self.custom_font,
+            bg="black",
+            fg="white",
+            insertbackground="white",
+            relief=tk.FLAT
+        )
+        self.command_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        self.command_entry.focus()
+
+    def print_welcome(self):
+        welcome_msg = "Welcome to VFS Emulator\nType 'exit' to quit.\n"
+        self.print_output(welcome_msg)
+
+    def load_startup_script(self):
+        if self.startup_script and os.path.exists(self.startup_script):
+            try:
+                with open(self.startup_script, 'r', encoding='utf-8') as file:
+                    lines = file.readlines()
+                for line in lines:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        self.print_output(f"{self.username}@{self.hostname}$ {line}\n")
+                        command, args = self.parse_command(line)
+                        self.log_command(command, args)
+                        success = self.execute_parsed_command(command, args)
+                        if not success:
+                            self.print_output("Script execution stopped due to error.\n")
+                            return
+            except Exception as e:
+                self.print_output(f"Error executing startup script: {e}\n")
+        elif self.startup_script:
+            self.print_output(f"Error: startup script not found: {self.startup_script}\n")
+
+    def prompt(self):
+        self.prompt_label.config(text=f"{self.username}@{self.hostname}$ ")
+
+    def print_output(self, text):
+        self.output_area.config(state="normal")
+        self.output_area.insert(tk.END, text)
+        self.output_area.see(tk.END)
+        self.output_area.config(state="disabled")
+
+    def parse_command(self, command_line):
+        parts = command_line.strip().split()
+        if not parts:
+            return "", []
+        return parts[0], parts[1:]
+
+    def log_command(self, command, args):
+        root_elem = ET.Element("log")
+        event_elem = ET.SubElement(root_elem, "event")
+        ET.SubElement(event_elem, "timestamp").text = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ET.SubElement(event_elem, "command").text = command
+        ET.SubElement(event_elem, "arguments").text = " ".join(args) if args else ""
+
+        if os.path.exists(self.log_file):
+            try:
+                existing_tree = ET.parse(self.log_file)
+                existing_root = existing_tree.getroot()
+                existing_root.append(event_elem)
+                indent(existing_root)
+                tree = ET.ElementTree(existing_root)
+            except ET.ParseError:
+                indent(root_elem)
+                tree = ET.ElementTree(root_elem)
+        else:
+            indent(root_elem)
+            tree = ET.ElementTree(root_elem)
+
+        tree.write(self.log_file, encoding="utf-8", xml_declaration=True)
+
+    def execute_command(self, event=None):
+        command_line = self.command_entry.get().strip()
+        if not command_line:
+            self.command_entry.delete(0, tk.END)
+            return
+        self.print_output(f"{self.username}@{self.hostname}$ {command_line}\n")
+        command, args = self.parse_command(command_line)
+        self.log_command(command, args)
+        success = self.execute_parsed_command(command, args)
+        if not success:
+            self.print_output("Script execution stopped due to error.\n")
+        self.command_entry.delete(0, tk.END)
+
+    def execute_parsed_command(self, command, args):
+        if command == "exit":
+            self.cmd_exit(args)
+            return True
+        elif command == "ls":
+            return self.cmd_ls(args)
+        elif command == "cd":
+            return self.cmd_cd(args)
+        elif command == "vfs-info":
+            self.cmd_vfs_info(args)
+            return True
+        elif command == "cat":
+            return self.cmd_cat(args)
+        elif command == "rev":
+            return self.cmd_rev(args)
+        elif command == "whoami":
+            return self.cmd_whoami(args)
+        elif command:
+            self.print_output(f"vfs: {command}: command not found\n")
+            return False
+        return True
+
+    def cmd_exit(self, args):
+        if args:
+            self.print_output(f"exit: arguments: {args}\n")
+        self.print_output("Exiting...\n")
+        self.root.after(100, self.root.destroy)
+
+    def _resolve_path(self, given_path):
+        if given_path == "":
+            return self.current_path[1:] if self.current_path != ["/"] else []
+        if given_path == "/":
+            return []
+        if given_path.startswith("/"):
+            parts = [p for p in given_path.split("/") if p]
+        else:
+            current_parts = self.current_path[1:] if self.current_path != ["/"] else []
+            parts = current_parts + [p for p in given_path.split("/") if p]
+        resolved = []
+        for part in parts:
+            if part == "..":
+                if resolved:
+                    resolved.pop()
+            elif part == ".":
+                continue
+            else:
+                resolved.append(part)
+        return resolved
+
+    def _get_node(self, path_parts):
+        current = self.vfs_tree[""]
+        if current["type"] != "dir":
+            return None
+        children = current["children"]
+
+        for part in path_parts:
+            if part not in children:
+                return None
+            node = children[part]
+            if node["type"] == "dir":
+                children = node["children"]
+            else:
+                if part != path_parts[-1]:
+                    return None
+                return node
+        return current if not path_parts else {"type": "dir", "children": children}
+
+    def cmd_ls(self, args):
+        target = args[0] if args else ""
+        path_parts = self._resolve_path(target)
+        node = self._get_node(path_parts)
+        if node is None:
+            self.print_output(f"ls: cannot access '{target or '/'}': No such file or directory\n")
+            return False
+        if node["type"] != "dir":
+            self.print_output(f"ls: '{target or '/'}' is not a directory\n")
+            return False
+        names = sorted(node["children"].keys())
+        if names:
+            self.print_output("  ".join(names) + "\n")
+        return True
+
+    def cmd_cd(self, args):
+        if not args:
+            self.current_path = ["/"]
+            return True
+        target = args[0]
+        if target == "..":
+            if len(self.current_path) > 1:
+                self.current_path.pop()
+            return True
+        elif target == "." or target == "/":
+            if target == "/":
+                self.current_path = ["/"]
+            return True
+        path_parts = self._resolve_path(target)
+        node = self._get_node(path_parts)
+        if node is None:
+            self.print_output(f"cd: {target}: No such file or directory\n")
+            return False
+        if node["type"] != "dir":
+            self.print_output(f"cd: {target}: Not a directory\n")
+            return False
+        self.current_path = ["/"] + path_parts
+        return True
+
+    def cmd_vfs_info(self, args):
+        if args:
+            self.print_output("vfs-info: unexpected argument\n")
+            return False
+        self.print_output(f"VFS name: {self.title}\n")
+        self.print_output(f"SHA-256: {self.vfs_sha256}\n")
+        return True
+
+    def cmd_whoami(self, args):
+        if args:
+            self.print_output(f"whoami: extra operand '{args[0]}'\n")
+            return False
+        self.print_output(f"{self.username}\n")
+        return True
+
+    def cmd_cat(self, args):
+        if not args:
+            self.print_output("cat: missing operand\n")
+            return False
+        target = args[0]
+        path_parts = self._resolve_path(target)
+        node = self._get_node(path_parts)
+        if node is None:
+            self.print_output(f"cat: {target}: No such file or directory\n")
+            return False
+        if node["type"] != "file":
+            self.print_output(f"cat: {target}: Is a directory\n")
+            return False
+        try:
+            content = node["content"].decode('utf-8')
+            if not content.endswith('\n'):
+                content += '\n'
+            self.print_output(content)
+        except UnicodeDecodeError:
+            self.print_output(f"cat: {target}: Cannot decode file content\n")
+            return False
+        return True
+
+    def cmd_rev(self, args):
+        if not args:
+            self.print_output("rev: missing operand\n")
+            return False
+        target = args[0]
+        path_parts = self._resolve_path(target)
+        node = self._get_node(path_parts)
+        if node is None:
+            self.print_output(f"rev: {target}: No such file or directory\n")
+            return False
+        if node["type"] != "file":
+            self.print_output(f"rev: {target}: Is a directory\n")
+            return False
+        try:
+            content = node["content"].decode('utf-8')
+            reversed_lines = [line[::-1] for line in content.splitlines()]
+            output = '\n'.join(reversed_lines)
+            if reversed_lines:
+                output += '\n'
+            self.print_output(output)
+        except UnicodeDecodeError:
+            self.print_output(f"rev: {target}: Cannot decode file content\n")
+            return False
+        return True
+
+
+def main():
+    parser = argparse.ArgumentParser(description="VFS Emulator")
+    parser.add_argument("--vfs-path", required=True, help="Path to VFS")
+    parser.add_argument("--log-file", required=True, help="Path to log file")
+    parser.add_argument("--startup-script", help="Path to startup script")
+
+    args = parser.parse_args()
+
+    root = tk.Tk()
+    root.geometry("800x600")
+    root.configure(bg="black")
+    emulator = VFSEmulator(root, args.vfs_path, args.log_file, args.startup_script)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
