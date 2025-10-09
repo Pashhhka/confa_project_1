@@ -1,10 +1,14 @@
+whoami
 ls
-ls /home
-ls /home/user
-cd /home
+cd /home/user
 ls
-cd user
+cat note.txt
+rev note.txt
 cd /etc
-ls
+cat hosts
+rev hosts
 cd /
-vfs-info
+ls
+cat /home/user/note.txt
+rev /etc/hosts
+whoami

@@ -1,13 +1,12 @@
-ls /nonexistent
-cat /missing.txt
-cd /invalid_dir
-
-cd /etc/hosts
-
-ls /home/user/note.txt
-
-unknown_command
-
-vfs-info
-
-exit
+whoami extra_arg
+cat
+cat nonexistent.txt
+cat /home
+cat /etc/nonexistent
+rev
+rev missing.txt
+rev /home/user
+rev /bin
+invalidcommand
+cd /nonexistent
+ls

@@ -32,9 +32,13 @@ class VFSEmulator:
         self.vfs_path = vfs_path
         self.log_file = log_file
         self.startup_script = startup_script
-        self.current_path = ["/"]  # текущий путь как список
+        self.current_path = ["/"]
         self.title = os.path.splitext(os.path.basename(vfs_path))[0]
-        self.root.title(f"{self.title}")
+        self.username = "user"      # <-- ДОБАВЛЕНО: имя пользователя
+        self.hostname = "vfs"       # <-- ДОБАВЛЕНО: имя хоста
+
+        # Заголовок окна по ТЗ: "должен содержать имя VFS"
+        self.root.title(f"VFS - {self.title}")
         self.custom_font = font.Font(family="Courier New", size=10)
 
         # Загрузка VFS
@@ -52,7 +56,6 @@ class VFSEmulator:
 
         self.create_widgets()
         self.print_welcome()
-        self.log_startup_parameters()
         self.load_startup_script()
         self.prompt()
         self.command_entry.bind("<Return>", self.execute_command)
@@ -68,7 +71,7 @@ class VFSEmulator:
                 if part not in current:
                     current[part] = {"type": "dir", "children": {}}
                 elif current[part]["type"] != "dir":
-                    pass  # игнорируем конфликт
+                    pass
                 current = current[part]["children"]
             last = parts[-1] if parts else ""
             if not parts:
@@ -80,9 +83,6 @@ class VFSEmulator:
                     content = base64.b64decode(row["content"]) if row["content"] else b""
                     current[last] = {"type": "file", "content": content}
         return tree
-
-    def log_startup_parameters(self):
-        pass  # убран debug-вывод в stdout (не требуется по ТЗ)
 
     def create_widgets(self):
         main_frame = tk.Frame(self.root)
@@ -104,7 +104,7 @@ class VFSEmulator:
 
         self.prompt_label = tk.Label(
             input_frame,
-            text="user@vfs$ ",
+            text=f"{self.username}@{self.hostname}$ ",  # <-- ИСПОЛЬЗУЕТСЯ username/hostname
             font=self.custom_font,
             bg="black",
             fg="green",
@@ -135,7 +135,8 @@ class VFSEmulator:
                 for line in lines:
                     line = line.strip()
                     if line and not line.startswith('#'):
-                        self.print_output(f"user@vfs$ {line}\n")
+                        # <-- ИСПОЛЬЗУЕТСЯ username/hostname
+                        self.print_output(f"{self.username}@{self.hostname}$ {line}\n")
                         command, args = self.parse_command(line)
                         self.log_command(command, args)
                         success = self.execute_parsed_command(command, args)
@@ -148,7 +149,7 @@ class VFSEmulator:
             self.print_output(f"Error: startup script not found: {self.startup_script}\n")
 
     def prompt(self):
-        self.prompt_label.config(text="user@vfs$ ")
+        self.prompt_label.config(text=f"{self.username}@{self.hostname}$ ")
 
     def print_output(self, text):
         self.output_area.config(state="normal")
@@ -190,7 +191,8 @@ class VFSEmulator:
         if not command_line:
             self.command_entry.delete(0, tk.END)
             return
-        self.print_output(f"user@vfs$ {command_line}\n")
+        # <-- ИСПОЛЬЗУЕТСЯ username/hostname
+        self.print_output(f"{self.username}@{self.hostname}$ {command_line}\n")
         command, args = self.parse_command(command_line)
         self.log_command(command, args)
         success = self.execute_parsed_command(command, args)
@@ -209,6 +211,12 @@ class VFSEmulator:
         elif command == "vfs-info":
             self.cmd_vfs_info(args)
             return True
+        elif command == "cat":
+            return self.cmd_cat(args)
+        elif command == "rev":
+            return self.cmd_rev(args)
+        elif command == "whoami":
+            return self.cmd_whoami(args)
         elif command:
             self.print_output(f"vfs: {command}: command not found\n")
             return False
@@ -222,7 +230,6 @@ class VFSEmulator:
 
     def _resolve_path(self, given_path):
         if given_path == "":
-            # Без аргумента — используем текущий путь
             return self.current_path[1:] if self.current_path != ["/"] else []
         if given_path == "/":
             return []
@@ -259,6 +266,7 @@ class VFSEmulator:
                     return None
                 return node
         return current if not path_parts else {"type": "dir", "children": children}
+
     def cmd_ls(self, args):
         target = args[0] if args else ""
         path_parts = self._resolve_path(target)
@@ -295,7 +303,7 @@ class VFSEmulator:
         if node["type"] != "dir":
             self.print_output(f"cd: {target}: Not a directory\n")
             return False
-        self.current_path = [""] + path_parts
+        self.current_path = ["/"] + path_parts
         return True
 
     def cmd_vfs_info(self, args):
@@ -304,6 +312,63 @@ class VFSEmulator:
             return False
         self.print_output(f"VFS name: {self.title}\n")
         self.print_output(f"SHA-256: {self.vfs_sha256}\n")
+        return True
+
+    # === НОВЫЕ КОМАНДЫ (ЭТАП 4) ===
+
+    def cmd_whoami(self, args):
+        if args:
+            self.print_output(f"whoami: extra operand '{args[0]}'\n")
+            return False
+        self.print_output(f"{self.username}\n")
+        return True
+
+    def cmd_cat(self, args):
+        if not args:
+            self.print_output("cat: missing operand\n")
+            return False
+        target = args[0]
+        path_parts = self._resolve_path(target)
+        node = self._get_node(path_parts)
+        if node is None:
+            self.print_output(f"cat: {target}: No such file or directory\n")
+            return False
+        if node["type"] != "file":
+            self.print_output(f"cat: {target}: Is a directory\n")
+            return False
+        try:
+            content = node["content"].decode('utf-8')
+            if not content.endswith('\n'):
+                content += '\n'
+            self.print_output(content)
+        except UnicodeDecodeError:
+            self.print_output(f"cat: {target}: Cannot decode file content\n")
+            return False
+        return True
+
+    def cmd_rev(self, args):
+        if not args:
+            self.print_output("rev: missing operand\n")
+            return False
+        target = args[0]
+        path_parts = self._resolve_path(target)
+        node = self._get_node(path_parts)
+        if node is None:
+            self.print_output(f"rev: {target}: No such file or directory\n")
+            return False
+        if node["type"] != "file":
+            self.print_output(f"rev: {target}: Is a directory\n")
+            return False
+        try:
+            content = node["content"].decode('utf-8')
+            reversed_lines = [line[::-1] for line in content.splitlines()]
+            output = '\n'.join(reversed_lines)
+            if reversed_lines:
+                output += '\n'
+            self.print_output(output)
+        except UnicodeDecodeError:
+            self.print_output(f"rev: {target}: Cannot decode file content\n")
+            return False
         return True
 
 
